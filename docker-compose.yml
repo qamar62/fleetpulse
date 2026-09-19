@@ -1,0 +1,98 @@
+# FleetPulse - production stack for Proxmox, fronted by a Cloudflare tunnel.
+#
+#   docker compose up -d --build --wait     (--wait blocks until healthy)
+#
+# Only nginx publishes a port. Point the existing tunnel at it:
+#   fp.qaam.work  ->  http://<proxmox-host>:8090
+# No TLS anywhere in here on purpose - Cloudflare already did that.
+
+name: fleetpulse
+
+services:
+  backend:
+    build:
+      context: ./backend
+    image: fleetpulse-backend:latest
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      # Pinned here rather than left to .env. Django defaults DEBUG to on, and a
+      # missing line in a hand-edited file must not be what puts a production
+      # box into debug mode with tracebacks on every error page.
+      DJANGO_DEBUG: "False"
+      # Four slashes: an absolute path. The database lives on the volume below,
+      # never inside the image, so rebuilding does not touch a single record.
+      DATABASE_URL: sqlite:////data/db.sqlite3
+    volumes:
+      - fleetpulse-data:/data
+    expose:
+      - "8000"
+    healthcheck:
+      # No curl in the image - Python is already here.
+      test: ["CMD", "python", "-c",
+             "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health/', timeout=5)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      # Generous: the first boot migrates an empty database before answering.
+      start_period: 60s
+    networks:
+      - fleetpulse
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        # Relative on purpose - the browser calls the same origin it loaded
+        # from, so there is no CORS and no hostname baked into the image.
+        NEXT_PUBLIC_API_URL: /api
+    image: fleetpulse-frontend:latest
+    restart: unless-stopped
+    expose:
+      - "3000"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:3000/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    depends_on:
+      backend:
+        condition: service_started
+    networks:
+      - fleetpulse
+
+  nginx:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    ports:
+      # Host side only. Bind it to the LAN address if this box is exposed:
+      #   "10.0.0.5:8090:80"
+      - "${FLEETPULSE_PORT:-8090}:80"
+    volumes:
+      - ./deploy/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+    healthcheck:
+      # Asks nginx about itself. Pointing this at the API would report nginx as
+      # unhealthy whenever Django was, which is a different fact.
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1/nginx-health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    depends_on:
+      - backend
+      - frontend
+    networks:
+      - fleetpulse
+
+volumes:
+  # The whole of FleetPulse's state. Back this up and you have backed up
+  # everything: docker run --rm -v fleetpulse_fleetpulse-data:/data -v "$PWD":/out \
+  #   alpine tar czf /out/fleetpulse-$(date +%F).tar.gz -C /data .
+  fleetpulse-data:
+
+networks:
+  # No fixed subnet on purpose: pinning one risks "Pool overlaps with other
+  # one" on a host that already runs other stacks, and nginx trusts the private
+  # ranges generally rather than one exact subnet.
+  fleetpulse:

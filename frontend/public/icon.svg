@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 180 180" role="img" aria-label="FP">
+  <!-- Same 180-unit grid as the PNG icons, so every size of the mark lines up.
+       The tile inverts in dark chrome; without it the dark square would vanish
+       into the tab strip. -->
+  <style>
+    .tile { fill: #10201f }
+    .mark { fill: #55cfa4 }
+    @media (prefers-color-scheme: dark) {
+      .tile { fill: #55cfa4 }
+      .mark { fill: #10201f }
+    }
+  </style>
+  <rect class="tile" width="180" height="180" rx="40" />
+  <path class="mark" d="M32,46 h46 v16 h-30 v22 h26 v16 h-26 v34 h-16 z" />
+  <path class="mark" fill-rule="evenodd"
+        d="M94,46 h27 a27,27 0 0 1 0,54 h-11 v34 h-16 z
+           M110,62 h11 a11,11 0 0 1 0,22 h-11 z" />
+</svg>
