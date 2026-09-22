@@ -2,6 +2,7 @@
 
 import type {
   AuditEntry,
+  CashDesk,
   CurrentUser,
   Dashboard,
   Driver,
@@ -261,6 +262,7 @@ export const api = {
 
   /* analytics */
   dashboard: (query: Query) => request<Dashboard>('/analytics/dashboard/', { query }),
+  cashDesk: (query: Query) => request<CashDesk>('/analytics/cash/', { query }),
   analytics: <T = any>(key: string, query: Query) =>
     request<T>(`/analytics/${key}/`, { query }),
   insights: (query: Query) =>

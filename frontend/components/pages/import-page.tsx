@@ -445,7 +445,7 @@ function Review({
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <Tile label="New entries" value={fmtNumber(s.rows_to_create)} />
         <Tile label="Existing entries" value={fmtNumber(s.rows_to_update)} />
-        <Tile label="Total income in file" value={fmtMoney(s.total_income, currency)} />
+        <Tile label="Total income in file (incl. cash)" value={fmtMoney(s.total_income, currency)} />
         <Tile
           label="Date range"
           value={

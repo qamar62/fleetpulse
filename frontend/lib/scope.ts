@@ -12,6 +12,12 @@ export interface ScopeState {
   end: string
   driver: number | null
   vehicle: number | null
+  /**
+   * Count cash collections as income. Off by default: cash is the one line that
+   * cannot be reconciled against a platform statement, so counting it silently
+   * would flatter every margin in the app.
+   */
+  includeCash: boolean
 }
 
 export const DEFAULT_SCOPE: ScopeState = {
@@ -21,6 +27,34 @@ export const DEFAULT_SCOPE: ScopeState = {
   end: '',
   driver: null,
   vehicle: null,
+  includeCash: false,
+}
+
+/** Where the cash preference is remembered between pages and reloads. */
+export const INCLUDE_CASH_KEY = 'fleet-pulse.include-cash'
+
+/**
+ * The remembered cash preference, or false when there is nothing to read.
+ *
+ * Only safe to call from the browser, and only after mount - reading storage
+ * during render would make the server and the first client render disagree.
+ */
+export function readIncludeCash(): boolean {
+  try {
+    return window.localStorage.getItem(INCLUDE_CASH_KEY) === 'true'
+  } catch {
+    // Private browsing and blocked storage both throw here. A preference this
+    // small is not worth breaking the page over.
+    return false
+  }
+}
+
+export function writeIncludeCash(value: boolean): void {
+  try {
+    window.localStorage.setItem(INCLUDE_CASH_KEY, value ? 'true' : 'false')
+  } catch {
+    /* see readIncludeCash */
+  }
 }
 
 /** True when a custom range is selected but not yet usable. */
@@ -49,6 +83,9 @@ export function scopeQuery(scope: ScopeState): Query {
   }
   if (scope.driver) query.driver = scope.driver
   if (scope.vehicle) query.vehicle = scope.vehicle
+  // Sent only when on. The backend defaults to excluding cash, so an absent
+  // parameter and `false` mean the same thing and the URL stays clean.
+  if (scope.includeCash) query.include_cash = 'true'
   return query
 }
 

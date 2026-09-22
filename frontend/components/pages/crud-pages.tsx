@@ -1,7 +1,7 @@
 'use client'
 
 import { useMemo } from 'react'
-import { CarFront, CircleDollarSign, FileText, Users, WalletCards } from 'lucide-react'
+import { Banknote, CarFront, CircleDollarSign, FileText, Users, WalletCards } from 'lucide-react'
 import { api } from '@/lib/api'
 import { useApi } from '@/lib/use-api'
 import { scopeQuery, type ScopeState } from '@/lib/scope'
@@ -235,22 +235,29 @@ export function EarningsPage({ scope, meta }: { scope: ScopeState; meta: Meta | 
     { key: 'date', label: 'Date', render: (r) => <span className="font-medium">{fmtDate(r.date)}</span> },
     { key: 'driver', label: 'Driver', render: (r) => r.driver_name },
     { key: 'vehicle', label: 'Vehicle', render: (r) => <span className="text-muted-foreground">{r.vehicle_name}</span> },
-    ...platforms.map<ColumnSpec<Earning>>((platform) => ({
-      key: platform.value,
-      label: platform.label,
-      align: 'right',
-      render: (r) => (
-        <span className="font-mono text-muted-foreground">
-          {fmtMoney((r as any)[platform.value])}
-        </span>
-      ),
-    })),
+    ...platforms.map<ColumnSpec<Earning>>((platform) => {
+      // The cash column is called out when it is sitting outside the total, so
+      // the row adds up on screen instead of appearing to be short by the cash.
+      const excluded = platform.value === 'cash' && !scope.includeCash
+      return {
+        key: platform.value,
+        label: excluded ? `${platform.label} (not counted)` : platform.label,
+        align: 'right',
+        render: (r) => (
+          <span className={`font-mono ${excluded ? 'text-[#d2618a]' : 'text-muted-foreground'}`}>
+            {fmtMoney((r as any)[platform.value])}
+          </span>
+        ),
+      }
+    }),
     {
       key: 'total',
-      label: 'Total income',
+      label: scope.includeCash ? 'Total income' : 'Total income (excl. cash)',
       align: 'right',
       render: (r) => (
-        <span className="font-mono font-semibold text-emerald-600">{fmtMoney(r.total_income)}</span>
+        <span className="font-mono font-semibold text-emerald-600">
+          {fmtMoney(scope.includeCash ? r.total_income : r.platform_income)}
+        </span>
       ),
     },
     { key: 'status', label: 'Status', render: (r) => <StatusPill value={r.status} /> },
@@ -275,7 +282,11 @@ export function EarningsPage({ scope, meta }: { scope: ScopeState; meta: Meta | 
       resource="earnings"
       title="Daily earnings"
       eyebrow="Workspace / Daily earnings"
-      description="Every income entry by driver, vehicle and platform. Total income is computed by the database."
+      description={
+        scope.includeCash
+          ? 'Every income entry by driver, vehicle and platform, cash included in the total.'
+          : 'Every income entry by driver, vehicle and platform. Cash is shown but left out of the total — switch the basis in the bar above.'
+      }
       icon={WalletCards}
       columns={columns}
       fields={fields}
@@ -303,8 +314,19 @@ function EarningsStrip({ scope }: { scope: ScopeState }) {
   const label = summary.data?.scope?.period?.label ?? ''
 
   return (
-    <div className="mb-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-      <MetricCard label="Gross income" value={fmtMoney(s.gross_income)} icon={CircleDollarSign} changeText={label} />
+    <div className="mb-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
+      <MetricCard
+        label={s.includes_cash ? 'Gross income' : 'Gross income (excl. cash)'}
+        value={fmtMoney(s.gross_income)}
+        icon={CircleDollarSign}
+        changeText={label}
+      />
+      <MetricCard
+        label="Cash collected"
+        value={fmtMoney(s.cash_income)}
+        icon={Banknote}
+        changeText={s.includes_cash ? 'counted above' : 'not in the figure left'}
+      />
       <MetricCard label="Operating profit" value={fmtMoney(s.operating_profit)} icon={WalletCards} changeText={`${fmtPercent(s.operating_margin_pct)} margin`} />
       <MetricCard label="Recorded entries" value={fmtNumber(s.entries)} icon={FileText} changeText={`${fmtNumber(s.active_days)} active days`} />
       <MetricCard label="Average per entry" value={fmtMoney(s.average_daily_income)} icon={CarFront} changeText="per earning day" />

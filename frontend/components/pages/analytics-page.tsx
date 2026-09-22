@@ -401,7 +401,15 @@ function PlatformPerformance({ data, c }: { data: any; c: string }) {
   return (
     <div className="space-y-5">
       <div className="grid gap-4 sm:grid-cols-2">
-        <Stat label="Gross income" value={fmtMoney(data.gross_income, c)} />
+        <Stat
+          label={data.includes_cash ? 'Gross income' : 'Gross income (excl. cash)'}
+          value={fmtMoney(data.gross_income, c)}
+          hint={
+            data.includes_cash
+              ? 'Cash counted alongside the platforms'
+              : `${fmtMoney(data.cash_income, c)} cash collected, not counted here`
+          }
+        />
         <Stat
           label="Leading platform"
           value={data.leader ? String(data.leader.platform).toUpperCase() : 'N/A'}
@@ -725,6 +733,14 @@ function CashVsPlatform({ data, c }: { data: any; c: string }) {
         <Stat label="Platform income" value={fmtMoney(data.platform_income, c)} />
         <Stat label="Platform share" value={fmtPercent(data.platform_share_pct)} />
       </div>
+
+      <p className="text-[11px] text-muted-foreground">
+        Both shares are measured against every dirham taken, so they do not move with the
+        include-cash switch.{' '}
+        {data.includes_cash
+          ? 'Cash is currently counted as income across the rest of the app.'
+          : 'Cash is currently left out of income across the rest of the app.'}
+      </p>
 
       {series.length ? (
         <Panel

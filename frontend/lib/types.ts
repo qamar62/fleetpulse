@@ -21,6 +21,9 @@ export interface Scope {
   period: Period
   driver_id: number | null
   vehicle_id: number | null
+  /** Whether cash collections were counted as income in this response. */
+  include_cash: boolean
+  income_basis: 'with_cash' | 'excluding_cash'
 }
 
 export interface Paginated<T> {
@@ -127,6 +130,8 @@ export interface Earning {
   yango: Money
   cash: Money
   total_income: Money
+  /** `total_income` with cash removed - what counts as income by default. */
+  platform_income: Money
   platform_shares: Record<string, number>
   status: string
   notes: string
@@ -217,6 +222,8 @@ export interface PlatformSlice {
   share_pct: number | null
   active_days: number
   average_per_active_day: number | null
+  /** Only on the cash slice: whether this money is part of gross income. */
+  counted?: boolean
 }
 
 export interface CategorySlice {
@@ -233,13 +240,20 @@ export interface DayPoint {
   date: string
   weekday: string
   income: number
+  /** Cash taken that day, whether or not `income` counts it. */
+  cash: number
   expenses: number
   net_operating_result: number
   platforms: Record<string, number>
 }
 
 export interface FinancialSummary {
+  /** Follows the cash toggle: platform-only by default. */
   gross_income: number
+  /** Everything taken, cash included. Reported whichever way the toggle sits. */
+  gross_income_with_cash: number
+  cash_income: number
+  includes_cash: boolean
   operating_expenses: number
   operating_profit: number
   payroll: number
@@ -257,6 +271,8 @@ export interface FinancialSummary {
   average_daily_income: number | null
   expense_per_active_day: number | null
   platforms: PlatformSlice[]
+  /** The cash slice, always present - it is excluded from `platforms` when not counted. */
+  cash: PlatformSlice
   expense_categories: CategorySlice[]
   net_cash_balance: number
 }
@@ -290,6 +306,7 @@ export interface Dashboard {
   coverage: { calendar_days: number; active_days: number; inactive_days: number }
   series: DayPoint[]
   platforms: PlatformSlice[]
+  cash: PlatformSlice
   expense_categories: CategorySlice[]
   profitability: {
     steps: WaterfallStep[]
@@ -450,3 +467,65 @@ export interface ImportResult {
   status?: string
   [key: string]: any
 }
+
+/* ------------------------------------------------------------------ */
+/* Cash desk                                                           */
+/* ------------------------------------------------------------------ */
+
+/** One party's cash record. Drivers and vehicles share every field but the name. */
+interface CashActor {
+  cash_income: number
+  /** Counted income the same rows produced, which is what the share is measured against. */
+  platform_income: number
+  cash_days: number
+  average_per_cash_day: number | null
+  cash_share_pct: number | null
+}
+
+export interface CashDriverRow extends CashActor {
+  driver_id: number
+  driver: string
+}
+
+export interface CashVehicleRow extends CashActor {
+  vehicle_id: number
+  vehicle: string
+  plate_number: string
+}
+
+export interface CashDay {
+  date: string
+  weekday: string
+  cash: number
+}
+
+export interface CashSeriesPoint extends CashDay {
+  platform: number
+  cumulative_cash: number
+  cash_share_pct: number | null
+}
+
+/**
+ * The Cash page in one response.
+ *
+ * None of these figures move with the include-cash toggle - the subject here is
+ * the cash itself. `includes_cash` only reports whether the rest of the app is
+ * currently counting this money as income.
+ */
+export interface CashDesk {
+  currency: string
+  scope: Scope
+  includes_cash: boolean
+  cash_income: number
+  platform_income: number
+  gross_income_with_cash: number
+  cash_share_pct: number | null
+  cash_days: number
+  average_per_cash_day: number | null
+  largest_cash_day: CashDay | null
+  series: CashSeriesPoint[]
+  by_driver: CashDriverRow[]
+  by_vehicle: CashVehicleRow[]
+  top_days: CashDay[]
+}
+

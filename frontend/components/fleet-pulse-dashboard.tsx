@@ -1,11 +1,13 @@
 'use client'
 
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   Activity,
+  Banknote,
   BarChart3,
   CarFront,
   CircleDollarSign,
+  Coins,
   FileText,
   LayoutDashboard,
   LogOut,
@@ -30,6 +32,8 @@ import {
   customRangeIsIncomplete,
   monthBounds,
   monthOptions,
+  readIncludeCash,
+  writeIncludeCash,
   type ScopeState,
 } from '@/lib/scope'
 import { initials } from '@/lib/format'
@@ -43,6 +47,7 @@ import {
   PayrollPage,
   VehiclesPage,
 } from '@/components/pages/crud-pages'
+import { CashPage } from '@/components/pages/cash-page'
 import { ReportsPage } from '@/components/pages/reports-page'
 import { AnalyticsPage } from '@/components/pages/analytics-page'
 import { ImportPage } from '@/components/pages/import-page'
@@ -51,6 +56,7 @@ import { SettingsPage } from '@/components/pages/settings-page'
 const WORKSPACE_NAV = [
   { label: 'Dashboard', icon: LayoutDashboard },
   { label: 'Daily Earnings', icon: WalletCards },
+  { label: 'Cash', icon: Banknote },
   { label: 'Drivers', icon: Users },
   { label: 'Vehicles', icon: CarFront },
   { label: 'Expenses', icon: CircleDollarSign },
@@ -68,6 +74,7 @@ const MANAGE_NAV = [
 const SCOPED_PAGES = new Set<string>([
   'Dashboard',
   'Daily Earnings',
+  'Cash',
   'Drivers',
   'Vehicles',
   'Expenses',
@@ -121,6 +128,26 @@ function Workspace() {
 
   // Close the drawer whenever the route changes on small screens.
   useEffect(() => setSidebarOpen(false), [activeNav])
+
+  // The cash preference is read after mount, not during render: localStorage
+  // does not exist on the server, and reading it in the initial state would
+  // make the first client render disagree with the markup sent down.
+  useEffect(() => {
+    if (readIncludeCash()) setScope((current) => ({ ...current, includeCash: true }))
+  }, [])
+
+  // The mount pass is skipped outright. It still holds the default rather than
+  // the remembered value, so writing there would stamp the default over the
+  // preference before it has been read back - and a preference the user has
+  // never expressed should not be recorded at all.
+  const mounting = useRef(true)
+  useEffect(() => {
+    if (mounting.current) {
+      mounting.current = false
+      return
+    }
+    writeIncludeCash(scope.includeCash)
+  }, [scope.includeCash])
 
   const firstName = user?.first_name || user?.username || 'there'
   const avatar = initials(
@@ -275,6 +302,8 @@ function Route({
   switch (activeNav) {
     case 'Daily Earnings':
       return <EarningsPage scope={scope} meta={meta} />
+    case 'Cash':
+      return <CashPage scope={scope} />
     case 'Drivers':
       return <DriversPage scope={scope} meta={meta} />
     case 'Vehicles':
@@ -467,14 +496,73 @@ function ScopeBar({
         ))}
       </select>
 
+      <CashToggle
+        includeCash={scope.includeCash}
+        onChange={(includeCash) => onChange({ ...scope, includeCash })}
+      />
+
       {(scope.driver || scope.vehicle || scope.range !== 'month') && (
         <button
-          onClick={() => onChange({ ...DEFAULT_SCOPE, month: scope.month || currentMonth() })}
+          onClick={() =>
+            onChange({
+              ...DEFAULT_SCOPE,
+              month: scope.month || currentMonth(),
+              // Reset clears the filters, not the accounting basis: which
+              // figures you are looking at is a preference, not a filter, and
+              // it is remembered across pages and reloads.
+              includeCash: scope.includeCash,
+            })
+          }
           className="rounded-lg border border-border bg-background px-3 py-2 text-[11px] font-medium text-muted-foreground hover:bg-muted"
         >
           Reset
         </button>
       )}
+    </div>
+  )
+}
+
+/**
+ * The include/exclude cash switch that governs every figure on every page.
+ *
+ * Both options are shown rather than a single checkbox, because "cash is off"
+ * is not the obvious default a reader would assume - the bar has to state which
+ * basis the numbers on screen are using, not just offer to change it.
+ */
+function CashToggle({
+  includeCash,
+  onChange,
+}: {
+  includeCash: boolean
+  onChange: (value: boolean) => void
+}) {
+  const options = [
+    { value: false, label: 'Excl. cash', title: 'Cash collections are not counted as income' },
+    { value: true, label: 'Incl. cash', title: 'Cash collections are counted as income' },
+  ]
+
+  return (
+    <div
+      className="flex items-center gap-1 rounded-lg bg-muted p-1"
+      role="group"
+      aria-label="Cash in total income"
+    >
+      <Coins className="ml-1 size-3.5 text-muted-foreground" />
+      {options.map((option) => (
+        <button
+          key={String(option.value)}
+          onClick={() => onChange(option.value)}
+          title={option.title}
+          aria-pressed={includeCash === option.value}
+          className={`rounded-md px-2.5 py-1.5 text-[10px] font-medium transition ${
+            includeCash === option.value
+              ? 'bg-background text-foreground shadow-sm'
+              : 'text-muted-foreground hover:text-foreground'
+          }`}
+        >
+          {option.label}
+        </button>
+      ))}
     </div>
   )
 }

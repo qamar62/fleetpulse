@@ -106,11 +106,15 @@ function DashboardBody({
     <div className="animate-in fade-in duration-300">
       <div className="mb-6 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         <MetricCard
-          label="Total gross income"
+          label={s.includes_cash ? 'Total gross income' : 'Gross income (excl. cash)'}
           value={fmtMoney(k.gross_income?.value, c)}
           icon={CircleDollarSign}
           kpi={k.gross_income}
-          note={versus}
+          note={
+            s.includes_cash
+              ? versus
+              : `${versus} · ${fmtMoneyShort(s.cash_income, c)} cash left out`
+          }
         />
         <MetricCard
           label="Total expenses"
@@ -297,7 +301,14 @@ function DashboardBody({
       </div>
 
       <div className="mt-5 grid gap-5 xl:grid-cols-2">
-        <Panel title="Platform performance" description="Income contribution by channel">
+        <Panel
+          title="Platform performance"
+          description={
+            s.includes_cash
+              ? 'Income contribution by channel, cash included'
+              : 'Income contribution by channel — cash is excluded and shown below'
+          }
+        >
           <div className="flex flex-col items-center gap-6 p-5 sm:flex-row">
             <div className="relative size-[150px] shrink-0">
               <ResponsiveContainer width="100%" height="100%">
@@ -325,7 +336,9 @@ function DashboardBody({
                 <span className="font-mono text-[15px] font-semibold">
                   {fmtMoneyShort(platformTotal, c)}
                 </span>
-                <span className="text-[9px] text-muted-foreground">total income</span>
+                <span className="text-[9px] text-muted-foreground">
+                  {s.includes_cash ? 'total income' : 'excl. cash'}
+                </span>
               </div>
             </div>
             <div className="min-w-0 flex-1 self-stretch">
@@ -440,10 +453,14 @@ function DashboardBody({
               </strong>
             </span>
             <span>
-              Cash share of income{' '}
+              Cash share of all money taken{' '}
               <strong className="font-mono text-foreground">
                 {fmtPercent(s.cash_to_income_pct)}
-              </strong>
+              </strong>{' '}
+              <em className="not-italic text-muted-foreground/80">
+                ({fmtMoney(s.cash_income, c)}
+                {s.includes_cash ? ', counted above' : ', not counted above'})
+              </em>
             </span>
           </div>
         </Panel>
@@ -496,16 +513,24 @@ function RecentEarnings({
               <table className="w-full min-w-[820px] text-left">
                 <thead className="bg-muted/40 text-[10px] uppercase tracking-wider text-muted-foreground">
                   <tr>
-                    {['Date', 'Driver', 'Vehicle', 'Careem', 'Uber', 'Bolt', 'Yango', 'Cash', 'Total'].map(
-                      (header) => (
-                        <th
-                          key={header}
-                          className={`px-5 py-3 font-semibold ${header === 'Total' ? 'text-right' : ''}`}
-                        >
-                          {header}
-                        </th>
-                      ),
-                    )}
+                    {[
+                      'Date',
+                      'Driver',
+                      'Vehicle',
+                      'Careem',
+                      'Uber',
+                      'Bolt',
+                      'Yango',
+                      scope.includeCash ? 'Cash' : 'Cash (not counted)',
+                      scope.includeCash ? 'Total' : 'Total (excl. cash)',
+                    ].map((header, index) => (
+                      <th
+                        key={header}
+                        className={`px-5 py-3 font-semibold ${index === 8 ? 'text-right' : ''}`}
+                      >
+                        {header}
+                      </th>
+                    ))}
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-border">
@@ -526,11 +551,18 @@ function RecentEarnings({
                       <td className="px-5 py-3.5 font-mono text-muted-foreground">
                         {fmtMoney(row.yango, currency)}
                       </td>
-                      <td className="px-5 py-3.5 font-mono text-muted-foreground">
+                      <td
+                        className={`px-5 py-3.5 font-mono ${
+                          scope.includeCash ? 'text-muted-foreground' : 'text-[#d2618a]'
+                        }`}
+                      >
                         {fmtMoney(row.cash, currency)}
                       </td>
                       <td className="px-5 py-3.5 text-right font-mono font-semibold text-emerald-600">
-                        {fmtMoney(row.total_income, currency)}
+                        {fmtMoney(
+                          scope.includeCash ? row.total_income : row.platform_income,
+                          currency,
+                        )}
                       </td>
                     </tr>
                   ))}
