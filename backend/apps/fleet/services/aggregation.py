@@ -11,7 +11,14 @@ Vocabulary, kept deliberately explicit:
 * **operating profit**   gross income - operating expenses
 * **payroll**            settlement salary charged for the period
 * **net result**         operating profit - payroll
-* **active day**         a calendar day where recorded income was above zero
+* **active day**         a calendar day where counted income was above zero
+
+Cash is deliberately *not* counted as income by default. Cash collections are
+the one line nobody can reconcile against a platform statement, so counting
+them flatters every margin in the system. ``Scope.include_cash`` turns them
+back on for a single request; every figure below follows that one flag rather
+than deciding for itself, which is why there is a single ``income_sum`` helper
+instead of ``Sum("total_income")`` scattered about.
 """
 
 from __future__ import annotations
@@ -31,10 +38,36 @@ from .periods import Period
 
 MONEY = DecimalField(max_digits=16, decimal_places=2)
 PLATFORMS = settings.INCOME_PLATFORMS
+CASH = settings.CASH_PLATFORM
+COUNTED_PLATFORMS = [name for name in PLATFORMS if name != CASH]
 
 
-def _zero_sum(field: str):
+def _zero_sum(field):
     return Coalesce(Sum(field), Value(ZERO), output_field=MONEY)
+
+
+def income_sum(scope: "Scope"):
+    """The income aggregate for a scope, cash in or out.
+
+    ``total_income`` is a generated column that always includes cash, so the
+    cash-free figure is that column minus the cash one rather than a second
+    stored total that could drift out of step with it.
+    """
+    if scope.include_cash:
+        return _zero_sum("total_income")
+    return Coalesce(
+        Sum(F("total_income") - F("cash"), output_field=MONEY), Value(ZERO), output_field=MONEY
+    )
+
+
+def earned(scope: "Scope") -> Q:
+    """Rows that carry counted income.
+
+    With cash excluded this is ``total_income > cash``, which is the same test
+    as ``total_income - cash > 0`` but expressible as a plain filter, so it
+    works inside ``Count(filter=...)`` and on a raw queryset alike.
+    """
+    return Q(total_income__gt=0) if scope.include_cash else Q(total_income__gt=F(CASH))
 
 
 # ---------------------------------------------------------------------------
@@ -49,6 +82,8 @@ class Scope:
     period: Period
     driver_id: int | None = None
     vehicle_id: int | None = None
+    #: Count cash collections as income. Off unless the caller asks.
+    include_cash: bool = False
 
     def filters(self, date_field: str = "date") -> Q:
         query = Q()
@@ -79,13 +114,15 @@ class Scope:
         return PayrollSettlement.objects.filter(query)
 
     def with_period(self, period: Period) -> "Scope":
-        return Scope(period, self.driver_id, self.vehicle_id)
+        return Scope(period, self.driver_id, self.vehicle_id, self.include_cash)
 
     def as_dict(self) -> dict:
         return {
             "period": self.period.as_dict(),
             "driver_id": self.driver_id,
             "vehicle_id": self.vehicle_id,
+            "include_cash": self.include_cash,
+            "income_basis": "with_cash" if self.include_cash else "excluding_cash",
         }
 
 
@@ -101,10 +138,17 @@ def scope_from_request(params, *, default_range: str = "month") -> Scope:
         except (TypeError, ValueError):
             return None
 
+    def _flag(name: str) -> bool:
+        raw = params.get(name)
+        if raw is None:
+            return False
+        return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
     return Scope(
         period=resolve_period(params, default=default_range),
         driver_id=_int("driver") or _int("driver_id"),
         vehicle_id=_int("vehicle") or _int("vehicle_id"),
+        include_cash=_flag("include_cash"),
     )
 
 
@@ -114,12 +158,17 @@ def scope_from_request(params, *, default_range: str = "month") -> Scope:
 
 
 def income_totals(scope: Scope) -> dict:
-    """Gross income, per-platform income and day counts."""
+    """Counted income, per-platform income and day counts.
+
+    ``gross_income`` follows the scope's cash flag. ``cash_income`` and
+    ``gross_income_with_cash`` are reported either way, so a caller can always
+    show what was left out rather than having to guess.
+    """
     per_platform = {f"sum_{name}": _zero_sum(name) for name in PLATFORMS}
     row = scope.earnings().aggregate(
-        gross=_zero_sum("total_income"),
+        gross=income_sum(scope),
         entries=Count("id"),
-        active_days=Count("id", filter=Q(total_income__gt=0), distinct=True),
+        active_days=Count("id", filter=earned(scope), distinct=True),
         **per_platform,
     )
 
@@ -128,24 +177,40 @@ def income_totals(scope: Scope) -> dict:
     )
 
     gross = quantize(row["gross"])
-    platforms = OrderedDict()
-    for name in PLATFORMS:
+    cash_income = quantize(row[f"sum_{CASH}"])
+    gross_with_cash = gross if scope.include_cash else quantize(gross + cash_income)
+
+    def block(name: str, denominator) -> dict:
         amount = quantize(row[f"sum_{name}"])
         days = platform_days[f"days_{name}"]
-        platforms[name] = {
+        return {
             "platform": name,
             "label": name.title(),
             "income": amount,
-            "share_pct": pct(amount, gross),
+            "share_pct": pct(amount, denominator),
             "active_days": days,
             "average_per_active_day": quantize(safe_div(amount, days) or ZERO) if days else None,
         }
 
+    # Only the platforms that actually make up `gross` are listed, so every
+    # share_pct in the list is a share of the same total and they add to 100.
+    counted = PLATFORMS if scope.include_cash else COUNTED_PLATFORMS
+    platforms = OrderedDict((name, block(name, gross)) for name in counted)
+
+    # Cash is always reported separately, measured against the all-in total so
+    # the number means "this much of the money taken was cash" in both modes.
+    cash_block = block(CASH, gross_with_cash)
+    cash_block["counted"] = scope.include_cash
+
     return {
         "gross_income": gross,
+        "gross_income_with_cash": gross_with_cash,
+        "cash_income": cash_income,
+        "includes_cash": scope.include_cash,
         "entries": row["entries"],
         "active_days": row["active_days"],
         "platforms": platforms,
+        "cash": cash_block,
     }
 
 
@@ -213,10 +278,13 @@ def financial_summary(scope: Scope) -> dict:
     total_expenses = expenses["total_expenses"]
     operating_profit = quantize(gross - total_expenses)
     net_result = quantize(operating_profit - payroll["salary"])
-    cash_income = income["platforms"]["cash"]["income"] if "cash" in income["platforms"] else ZERO
+    cash_income = income["cash_income"]
 
     return {
         "gross_income": gross,
+        "gross_income_with_cash": income["gross_income_with_cash"],
+        "cash_income": cash_income,
+        "includes_cash": income["includes_cash"],
         "operating_expenses": total_expenses,
         "operating_profit": operating_profit,
         "payroll": payroll["salary"],
@@ -228,7 +296,10 @@ def financial_summary(scope: Scope) -> dict:
         "expense_to_income_pct": pct(total_expenses, gross),
         "fuel_to_income_pct": pct(expenses["fuel"], gross),
         "maintenance_to_income_pct": pct(expenses["maintenance"], gross),
-        "cash_to_income_pct": pct(cash_income, gross),
+        # Measured against the all-in total: the question this answers is
+        # "how much of the money taken was cash", which does not change when
+        # the toggle does.
+        "cash_to_income_pct": pct(cash_income, income["gross_income_with_cash"]),
         "active_days": income["active_days"],
         "entries": income["entries"],
         "average_daily_income": quantize(
@@ -238,6 +309,7 @@ def financial_summary(scope: Scope) -> dict:
             safe_div(total_expenses, income["active_days"]) or ZERO
         ) if income["active_days"] else None,
         "platforms": list(income["platforms"].values()),
+        "cash": income["cash"],
         "expense_categories": list(expenses["by_category"].values()),
         "net_cash_balance": quantize(operating_profit - payroll["paid_amount"]),
     }
@@ -275,7 +347,7 @@ def daily_series(scope: Scope, *, fill_gaps: bool = True) -> list[dict]:
         for row in scope.earnings()
         .values("date")
         .annotate(
-            income=_zero_sum("total_income"),
+            income=income_sum(scope),
             **{name: _zero_sum(name) for name in PLATFORMS},
         )
     }
@@ -299,6 +371,7 @@ def daily_series(scope: Scope, *, fill_gaps: bool = True) -> list[dict]:
                 "date": day.isoformat(),
                 "weekday": day.strftime("%A"),
                 "income": income,
+                "cash": quantize(income_row[CASH]) if income_row else ZERO,
                 "expenses": expenses,
                 "net_operating_result": quantize(income - expenses),
                 "platforms": {
@@ -316,7 +389,7 @@ def monthly_series(scope: Scope) -> list[dict]:
         for row in scope.earnings()
         .annotate(month=TruncMonth("date"))
         .values("month")
-        .annotate(income=_zero_sum("total_income"))
+        .annotate(income=income_sum(scope))
     }
     expense_rows = {
         row["month"].date() if hasattr(row["month"], "date") else row["month"]: row["expenses"]
@@ -371,8 +444,9 @@ def driver_breakdown(scope: Scope) -> list[dict]:
         for row in scope.earnings()
         .values("driver_id")
         .annotate(
-            gross=_zero_sum("total_income"),
-            active_days=Count("id", filter=Q(total_income__gt=0)),
+            gross=income_sum(scope),
+            cash_total=_zero_sum(CASH),
+            active_days=Count("id", filter=earned(scope)),
             entries=Count("id"),
         )
     }
@@ -409,6 +483,7 @@ def driver_breakdown(scope: Scope) -> list[dict]:
                 "vehicle": str(vehicle) if vehicle else None,
                 "vehicle_id": vehicle.id if vehicle else None,
                 "gross_income": gross,
+                "cash_income": quantize(stats["cash_total"]) if stats else ZERO,
                 "operating_expenses": spend,
                 "operating_profit": operating_profit,
                 "payroll": quantize(pay["salary"]) if pay else ZERO,
@@ -432,8 +507,9 @@ def vehicle_breakdown(scope: Scope) -> list[dict]:
         for row in scope.earnings()
         .values("vehicle_id")
         .annotate(
-            gross=_zero_sum("total_income"),
-            active_days=Count("id", filter=Q(total_income__gt=0)),
+            gross=income_sum(scope),
+            cash_total=_zero_sum(CASH),
+            active_days=Count("id", filter=earned(scope)),
         )
     }
     expense_rows = (
@@ -482,6 +558,7 @@ def vehicle_breakdown(scope: Scope) -> list[dict]:
                 else None,
                 "assigned_driver_id": vehicle.assigned_driver_id,
                 "gross_income": gross,
+                "cash_income": quantize(stats["cash_total"]) if stats else ZERO,
                 "fuel": quantize(spend["fuel"]) if spend else ZERO,
                 "salik": quantize(spend["salik"]) if spend else ZERO,
                 "maintenance": quantize(spend["maintenance"]) if spend else ZERO,
@@ -500,6 +577,89 @@ def vehicle_breakdown(scope: Scope) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
+# Cash desk
+# ---------------------------------------------------------------------------
+
+
+def cash_breakdown(scope: Scope) -> dict:
+    """Who collected cash, on what, and how often.
+
+    Every figure here is cash, so none of it moves when the include-cash flag
+    does. What the flag changes is only the comparison: ``platform_income`` is
+    the counted income these same rows produced, which is what makes the share
+    meaningful rather than a number floating on its own.
+    """
+    # Annotation aliases below deliberately avoid the name "cash": an alias
+    # that matches a column shadows it, and the expressions here reference the
+    # real cash column.
+    rows = scope.earnings().filter(**{f"{CASH}__gt": 0})
+
+    by_driver = []
+    for item in (
+        rows.values("driver_id", "driver__name")
+        .annotate(
+            cash_total=_zero_sum(CASH),
+            days=Count("id"),
+            platform_total=_zero_sum(F("total_income") - F(CASH)),
+        )
+        .order_by("-cash_total")
+    ):
+        cash = quantize(item["cash_total"])
+        platform = quantize(item["platform_total"])
+        by_driver.append(
+            {
+                "driver_id": item["driver_id"],
+                "driver": item["driver__name"],
+                "cash_income": cash,
+                "platform_income": platform,
+                "cash_days": item["days"],
+                "average_per_cash_day": quantize(safe_div(cash, item["days"]) or ZERO)
+                if item["days"]
+                else None,
+                "cash_share_pct": pct(cash, quantize(cash + platform)),
+            }
+        )
+
+    by_vehicle = []
+    for item in (
+        rows.values("vehicle_id", "vehicle__make", "vehicle__model", "vehicle__plate_number")
+        .annotate(
+            cash_total=_zero_sum(CASH),
+            days=Count("id"),
+            platform_total=_zero_sum(F("total_income") - F(CASH)),
+        )
+        .order_by("-cash_total")
+    ):
+        cash = quantize(item["cash_total"])
+        platform = quantize(item["platform_total"])
+        by_vehicle.append(
+            {
+                "vehicle_id": item["vehicle_id"],
+                "vehicle": f"{item['vehicle__make']} {item['vehicle__model']}".strip(),
+                "plate_number": item["vehicle__plate_number"],
+                "cash_income": cash,
+                "platform_income": platform,
+                "cash_days": item["days"],
+                "average_per_cash_day": quantize(safe_div(cash, item["days"]) or ZERO)
+                if item["days"]
+                else None,
+                "cash_share_pct": pct(cash, quantize(cash + platform)),
+            }
+        )
+
+    top_days = [
+        {
+            "date": item["date"].isoformat(),
+            "weekday": item["date"].strftime("%A"),
+            "cash": quantize(item["cash_total"]),
+        }
+        for item in rows.values("date").annotate(cash_total=_zero_sum(CASH)).order_by("-cash_total")[:10]
+    ]
+
+    return {"by_driver": by_driver, "by_vehicle": by_vehicle, "top_days": top_days}
+
+
+# ---------------------------------------------------------------------------
 # Notable days
 # ---------------------------------------------------------------------------
 
@@ -508,7 +668,7 @@ def best_and_worst_days(scope: Scope) -> dict:
     rows = (
         scope.earnings()
         .values("date")
-        .annotate(income=_zero_sum("total_income"))
+        .annotate(income=income_sum(scope))
         .order_by("-income")
     )
     rows = [row for row in rows if D(row["income"]) > 0]
@@ -549,7 +709,7 @@ def inactive_days(scope: Scope) -> dict:
         return {"calendar_days": None, "active_days": None, "inactive_days": None}
     calendar_days = scope.period.days
     active = (
-        scope.earnings().filter(total_income__gt=0).values("date").distinct().count()
+        scope.earnings().filter(earned(scope)).values("date").distinct().count()
     )
     return {
         "calendar_days": calendar_days,

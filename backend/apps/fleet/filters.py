@@ -61,6 +61,7 @@ class DailyEarningFilter(filters.FilterSet):
     min_total = filters.NumberFilter(field_name="total_income", lookup_expr="gte")
     max_total = filters.NumberFilter(field_name="total_income", lookup_expr="lte")
     has_income = filters.BooleanFilter(method="filter_has_income")
+    has_cash = filters.BooleanFilter(method="filter_has_cash")
     range = filters.CharFilter(method="filter_range")
     year = filters.CharFilter(method="filter_range")
 
@@ -87,6 +88,15 @@ class DailyEarningFilter(filters.FilterSet):
 
     def filter_has_income(self, queryset, name, value):
         return queryset.filter(total_income__gt=0) if value else queryset.filter(total_income=0)
+
+    def filter_has_cash(self, queryset, name, value):
+        """Rows that carry a cash collection - what the Cash page lists."""
+        field = settings.CASH_PLATFORM
+        return (
+            queryset.filter(**{f"{field}__gt": 0})
+            if value
+            else queryset.filter(**{field: 0})
+        )
 
 
 class ExpenseFilter(filters.FilterSet):

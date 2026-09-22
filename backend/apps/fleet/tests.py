@@ -133,32 +133,51 @@ class GeneratedFieldTests(TestCase):
 
 
 class FinancialSummaryTests(TestCase):
+    """The default basis: cash collected but not counted.
+
+    The seed takes 4000.00 in total, 950.00 of it in cash, so counted income
+    is 3050.00 unless a caller explicitly asks for cash.
+    """
+
     def setUp(self):
         _seed_minimal()
         self.summary = financial_summary(Scope(period=DEC))
 
-    def test_gross_income(self):
-        self.assertEqual(Decimal(str(self.summary["gross_income"])), Decimal("4000.00"))
+    def test_gross_income_excludes_cash_by_default(self):
+        self.assertEqual(Decimal(str(self.summary["gross_income"])), Decimal("3050.00"))
+
+    def test_cash_is_still_reported_alongside(self):
+        self.assertEqual(Decimal(str(self.summary["cash_income"])), Decimal("950.00"))
+        self.assertEqual(
+            Decimal(str(self.summary["gross_income_with_cash"])), Decimal("4000.00")
+        )
+        self.assertFalse(self.summary["includes_cash"])
 
     def test_operating_expenses_exclude_payroll(self):
         self.assertEqual(Decimal(str(self.summary["operating_expenses"])), Decimal("150.00"))
 
     def test_operating_profit_is_gross_minus_operating_expenses(self):
-        self.assertEqual(Decimal(str(self.summary["operating_profit"])), Decimal("3850.00"))
+        self.assertEqual(Decimal(str(self.summary["operating_profit"])), Decimal("2900.00"))
 
     def test_net_result_subtracts_payroll_separately(self):
         # Payroll cost for the period is the salary line, 3500.
-        self.assertEqual(Decimal(str(self.summary["net_result"])), Decimal("350.00"))
+        self.assertEqual(Decimal(str(self.summary["net_result"])), Decimal("-600.00"))
 
     def test_operating_margin(self):
-        # 3850 / 4000 * 100
-        self.assertEqual(Decimal(str(self.summary["operating_margin_pct"])), Decimal("96.25"))
+        # 2900 / 3050 * 100
+        self.assertEqual(Decimal(str(self.summary["operating_margin_pct"])), Decimal("95.08"))
 
-    def test_active_days_counts_days_with_income(self):
+    def test_active_days_counts_days_with_counted_income(self):
         self.assertEqual(self.summary["active_days"], 2)
 
     def test_average_daily_income_divides_by_active_days(self):
-        self.assertEqual(Decimal(str(self.summary["average_daily_income"])), Decimal("2000.00"))
+        self.assertEqual(Decimal(str(self.summary["average_daily_income"])), Decimal("1525.00"))
+
+    def test_cash_is_not_listed_among_the_counted_platforms(self):
+        """Every share_pct in the list must be a share of the same total."""
+        names = [p["platform"] for p in self.summary["platforms"]]
+        self.assertNotIn("cash", names)
+        self.assertEqual(names, ["careem", "uber", "bolt", "yango"])
 
     def test_empty_period_reports_na_not_zero_percent(self):
         empty = financial_summary(Scope(period=EMPTY))
@@ -166,6 +185,134 @@ class FinancialSummaryTests(TestCase):
         self.assertIsNone(empty["operating_margin_pct"])
         self.assertIsNone(empty["average_daily_income"])
         self.assertIsNone(empty["expense_to_income_pct"])
+
+
+class CashToggleTests(TestCase):
+    """Cash is opt-in, and switching it on must not change anything else.
+
+    The seed is 4000.00 all-in with 950.00 of it cash, so every assertion here
+    is really one identity: counted income plus cash equals the money taken.
+    """
+
+    def setUp(self):
+        _seed_minimal()
+        self.off = financial_summary(Scope(period=DEC))
+        self.on = financial_summary(Scope(period=DEC, include_cash=True))
+
+    def test_the_two_bases_differ_by_exactly_the_cash(self):
+        self.assertEqual(
+            Decimal(str(self.off["gross_income"])) + Decimal(str(self.off["cash_income"])),
+            Decimal(str(self.on["gross_income"])),
+        )
+
+    def test_cash_income_is_the_same_number_either_way(self):
+        self.assertEqual(
+            Decimal(str(self.off["cash_income"])), Decimal(str(self.on["cash_income"]))
+        )
+
+    def test_all_in_total_is_the_same_number_either_way(self):
+        self.assertEqual(
+            Decimal(str(self.off["gross_income_with_cash"])),
+            Decimal(str(self.on["gross_income_with_cash"])),
+        )
+
+    def test_cash_share_is_measured_against_the_all_in_total(self):
+        """950 / 4000, whatever the toggle says - otherwise the number moves
+        for a reason that has nothing to do with how much cash came in."""
+        self.assertEqual(Decimal(str(self.off["cash_to_income_pct"])), Decimal("23.75"))
+        self.assertEqual(Decimal(str(self.on["cash_to_income_pct"])), Decimal("23.75"))
+
+    def test_expenses_and_payroll_are_untouched(self):
+        for key in ("operating_expenses", "payroll", "payroll_paid"):
+            self.assertEqual(
+                Decimal(str(self.off[key])), Decimal(str(self.on[key])), key
+            )
+
+    def test_profit_moves_by_the_cash_too(self):
+        self.assertEqual(
+            Decimal(str(self.off["operating_profit"])) + Decimal(str(self.off["cash_income"])),
+            Decimal(str(self.on["operating_profit"])),
+        )
+
+    def test_cash_listed_among_platforms_only_when_counted(self):
+        self.assertNotIn("cash", [p["platform"] for p in self.off["platforms"]])
+        self.assertIn("cash", [p["platform"] for p in self.on["platforms"]])
+        self.assertFalse(self.off["cash"]["counted"])
+        self.assertTrue(self.on["cash"]["counted"])
+
+    def test_a_cash_only_day_is_not_an_active_day(self):
+        driver = Driver.objects.get()
+        vehicle = Vehicle.objects.get()
+        DailyEarning.objects.create(
+            date=date(2025, 12, 20), driver=driver, vehicle=vehicle,
+            cash=Decimal("400.00"),
+        )
+        self.assertEqual(financial_summary(Scope(period=DEC))["active_days"], 2)
+        self.assertEqual(
+            financial_summary(Scope(period=DEC, include_cash=True))["active_days"], 3
+        )
+
+    def test_per_driver_totals_follow_the_same_basis(self):
+        from apps.fleet.services.aggregation import driver_breakdown
+
+        off = driver_breakdown(Scope(period=DEC))[0]
+        on = driver_breakdown(Scope(period=DEC, include_cash=True))[0]
+        self.assertEqual(Decimal(str(off["gross_income"])), Decimal("3050.00"))
+        self.assertEqual(Decimal(str(on["gross_income"])), Decimal("4000.00"))
+        self.assertEqual(Decimal(str(off["cash_income"])), Decimal("950.00"))
+        self.assertEqual(Decimal(str(on["cash_income"])), Decimal("950.00"))
+
+
+class CashDeskTests(TestCase):
+    """The Cash page reports cash, so the toggle must not move its figures."""
+
+    def setUp(self):
+        _seed_minimal()
+        from apps.fleet.services.analytics import cash_desk
+
+        self.desk = cash_desk(Scope(period=DEC))
+        self.desk_on = cash_desk(Scope(period=DEC, include_cash=True))
+
+    def test_headline_cash_is_the_period_total(self):
+        self.assertEqual(Decimal(str(self.desk["cash_income"])), Decimal("950.00"))
+
+    def test_toggle_does_not_move_the_cash_figures(self):
+        for key in ("cash_income", "platform_income", "gross_income_with_cash", "cash_days"):
+            self.assertEqual(str(self.desk[key]), str(self.desk_on[key]), key)
+
+    def test_it_says_whether_the_rest_of_the_app_counts_this_money(self):
+        self.assertFalse(self.desk["includes_cash"])
+        self.assertTrue(self.desk_on["includes_cash"])
+
+    def test_driver_rows_add_back_to_the_headline(self):
+        self.assertEqual(
+            sum(Decimal(str(r["cash_income"])) for r in self.desk["by_driver"]),
+            Decimal(str(self.desk["cash_income"])),
+        )
+
+    def test_one_row_per_driver_not_one_per_day(self):
+        """Guards the grouping: ordering by a column re-splits the groups."""
+        self.assertEqual(len(self.desk["by_driver"]), 1)
+        self.assertEqual(self.desk["by_driver"][0]["cash_days"], 2)
+
+    def test_daily_series_adds_back_to_the_headline(self):
+        self.assertEqual(
+            sum(Decimal(str(r["cash"])) for r in self.desk["series"]),
+            Decimal(str(self.desk["cash_income"])),
+        )
+
+    def test_days_with_no_cash_are_left_out_of_the_breakdown(self):
+        driver = Driver.objects.get()
+        vehicle = Vehicle.objects.get()
+        DailyEarning.objects.create(
+            date=date(2025, 12, 21), driver=driver, vehicle=vehicle,
+            careem=Decimal("500.00"),
+        )
+        from apps.fleet.services.analytics import cash_desk
+
+        desk = cash_desk(Scope(period=DEC))
+        self.assertEqual(desk["by_driver"][0]["cash_days"], 2)
+        self.assertEqual(Decimal(str(desk["cash_income"])), Decimal("950.00"))
 
 
 class ComparisonTests(TestCase):
@@ -199,9 +346,9 @@ class ComparisonTests(TestCase):
             self.KEYS,
         )
         self.assertTrue(result["gross_income"]["has_comparison"])
-        # 4000 vs 2000
+        # 3050 counted in December vs 2000 in November.
         self.assertEqual(
-            Decimal(str(result["gross_income"]["change_pct"])), Decimal("100.00")
+            Decimal(str(result["gross_income"]["change_pct"])), Decimal("52.50")
         )
 
     def test_dashboard_flags_the_absence_of_a_comparison(self):
@@ -621,8 +768,19 @@ class ApiTests(TestCase):
 
         self.assertEqual(summary["scope"]["period"]["start"], "2025-12-01")
         self.assertEqual(summary["scope"]["period"]["end"], "2025-12-01")
+        # The list and the summary have to agree on what income means, so the
+        # cash-free column is what must match the cash-free total.
+        listed = sum(Decimal(str(row["platform_income"])) for row in rows)
+        self.assertEqual(listed, Decimal(str(summary["summary"]["gross_income"])))
+
+    def test_list_and_summary_agree_with_cash_switched_on(self):
+        query = "start=2025-12-01&end=2025-12-01&include_cash=true"
+        rows = self.client.get(f"/api/earnings/?{query}").data["results"]
+        summary = self.client.get(f"/api/earnings/summary/?{query}").data
+
         listed = sum(Decimal(str(row["total_income"])) for row in rows)
         self.assertEqual(listed, Decimal(str(summary["summary"]["gross_income"])))
+        self.assertTrue(summary["summary"]["includes_cash"])
 
     def test_a_backwards_custom_range_is_rejected_with_a_reason(self):
         response = self.client.get("/api/earnings/summary/?start=2025-12-31&end=2025-12-01")

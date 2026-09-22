@@ -218,6 +218,7 @@ class DailyEarningViewSet(AuditedModelMixin, ExportableMixin, viewsets.ModelView
         {"key": "vehicle_name", "label": "Vehicle"},
         *[{"key": name, "label": name.title()} for name in PLATFORMS],
         {"key": "total_income", "label": "Total income"},
+        {"key": "platform_income", "label": "Platform income (excl. cash)"},
         {"key": "status", "label": "Status"},
         {"key": "notes", "label": "Notes"},
     ]
@@ -382,6 +383,7 @@ class AnalyticsView(APIView):
         "comparison": lambda scope, request: analytics_service.comparison(scope),
         "monthly-trend": lambda scope, request: analytics_service.monthly_trend(scope),
         "cash-vs-platform": lambda scope, request: analytics_service.cash_vs_platform(scope),
+        "cash": lambda scope, request: analytics_service.cash_desk(scope),
         "platform-performance": lambda scope, request: analytics_service.platform_performance(
             scope
         ),
@@ -396,6 +398,7 @@ class AnalyticsView(APIView):
         "platforms": "platform-performance",
         "waterfall": "profitability",
         "overview": "dashboard",
+        "cash-desk": "cash",
     }
 
     def get(self, request, key: str | None = None):

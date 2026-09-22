@@ -60,6 +60,16 @@ def _kpi(label, value, fmt=MONEY, note=None):
     return {"label": label, "value": value, "format": fmt, "note": note}
 
 
+def _income_label(summary: dict, base: str = "Gross income") -> str:
+    """Say on the label itself whether cash is in the number.
+
+    A report is read away from the filter bar that produced it — printed,
+    exported, pasted into an email — so the caveat has to travel with the
+    figure rather than sit in the UI beside it.
+    """
+    return base if summary["includes_cash"] else f"{base} (excl. cash)"
+
+
 def _col(key, label, fmt=TEXT):
     return {"key": key, "label": label, "format": fmt}
 
@@ -78,7 +88,7 @@ def monthly_income(scope: Scope) -> dict:
         "Gross income, operating expenses and profit for each month in range.",
         scope,
         kpis=[
-            _kpi("Gross income", summary["gross_income"]),
+            _kpi(_income_label(summary), summary["gross_income"]),
             _kpi("Operating expenses", summary["operating_expenses"]),
             _kpi("Operating profit", summary["operating_profit"]),
             _kpi("Operating margin", summary["operating_margin_pct"], PCT),
@@ -116,7 +126,7 @@ def platform_report(scope: Scope) -> dict:
         "Income contribution, active days and daily average for every channel.",
         scope,
         kpis=[
-            _kpi("Gross income", data["gross_income"]),
+            _kpi(_income_label(data), data["gross_income"]),
             _kpi("Leading platform", leader["label"] if leader else None, TEXT),
             _kpi("Leader share", leader["share_pct"] if leader else None, PCT),
             _kpi("Channels with income", sum(1 for r in data["rows"] if D(r["income"]) > 0), NUMBER),
@@ -149,7 +159,7 @@ def driver_performance(scope: Scope) -> dict:
         scope,
         kpis=[
             _kpi("Drivers with activity", len(rows), NUMBER),
-            _kpi("Gross income", summary["gross_income"]),
+            _kpi(_income_label(summary), summary["gross_income"]),
             _kpi("Operating profit", summary["operating_profit"]),
             _kpi("Average daily income", summary["average_daily_income"]),
         ],
@@ -183,7 +193,7 @@ def vehicle_performance(scope: Scope) -> dict:
         scope,
         kpis=[
             _kpi("Vehicles with activity", len(rows), NUMBER),
-            _kpi("Gross income", summary["gross_income"]),
+            _kpi(_income_label(summary), summary["gross_income"]),
             _kpi("Operating expenses", summary["operating_expenses"]),
             _kpi("Expense / income", summary["expense_to_income_pct"], PCT),
         ],
@@ -268,7 +278,7 @@ def profitability(scope: Scope) -> dict:
         "The explicit chain from gross income to net result.",
         scope,
         kpis=[
-            _kpi("Gross income", summary["gross_income"]),
+            _kpi(_income_label(summary), summary["gross_income"]),
             _kpi("Operating profit", summary["operating_profit"]),
             _kpi("Operating margin", summary["operating_margin_pct"], PCT),
             _kpi("Net result", summary["net_result"]),
@@ -345,7 +355,12 @@ def payroll_report(scope: Scope) -> dict:
 
 def daily_earnings_report(scope: Scope) -> dict:
     summary = financial_summary(scope)
+    # Every platform column is still shown - the cash figures are real and
+    # worth seeing. What the toggle changes is only whether the cash column
+    # feeds the total, which is why the total is recomputed per row below
+    # rather than read off the generated column.
     platforms = settings.INCOME_PLATFORMS
+    cash_counts = summary["includes_cash"]
 
     rows = []
     expense_index = _expense_index(scope)
@@ -353,6 +368,8 @@ def daily_earnings_report(scope: Scope) -> dict:
         key = (earning.date, earning.driver_id, earning.vehicle_id)
         spend = expense_index.get(key, {"total": ZERO, "fuel": ZERO})
         total = D(earning.total_income)
+        if not cash_counts:
+            total = quantize(total - D(earning.cash))
         rows.append(
             {
                 "id": earning.id,
@@ -374,10 +391,10 @@ def daily_earnings_report(scope: Scope) -> dict:
         "The complete earnings ledger with matched same-day expenses.",
         scope,
         kpis=[
-            _kpi("Gross income", summary["gross_income"]),
+            _kpi(_income_label(summary), summary["gross_income"]),
+            _kpi("Cash collected", summary["cash_income"]),
             _kpi("Entries", summary["entries"], NUMBER),
             _kpi("Active days", summary["active_days"], NUMBER),
-            _kpi("Average daily income", summary["average_daily_income"]),
         ],
         charts=[{"type": "area", "title": "Daily income trend", "data": daily_series(scope)}],
         columns=[
@@ -385,7 +402,7 @@ def daily_earnings_report(scope: Scope) -> dict:
             _col("driver", "Driver"),
             _col("vehicle", "Vehicle"),
             *[_col(name, name.title(), MONEY) for name in platforms],
-            _col("total_income", "Total income", MONEY),
+            _col("total_income", _income_label(summary), MONEY),
             _col("fuel", "Fuel", MONEY),
             _col("other_expenses", "Other expenses", MONEY),
             _col("net_operating_result", "Net operating result", MONEY),
@@ -436,9 +453,7 @@ def cash_flow(scope: Scope) -> dict:
             }
         )
 
-    cash_platform = next(
-        (p for p in summary["platforms"] if p["platform"] == "cash"), None
-    )
+    cash_income = summary["cash_income"]
     return _envelope(
         "cash-flow",
         "Cash flow",
@@ -446,15 +461,17 @@ def cash_flow(scope: Scope) -> dict:
         "reported separately below the operating flow.",
         scope,
         kpis=[
-            _kpi("Total inflow", summary["gross_income"]),
+            _kpi(_income_label(summary, "Total inflow"), summary["gross_income"]),
             _kpi("Total outflow", summary["operating_expenses"]),
             _kpi("Net operating flow", summary["operating_profit"]),
             _kpi("Payroll paid", totals["paid_amount"]),
             _kpi(
                 "Cash collected",
-                cash_platform["income"] if cash_platform else ZERO,
+                cash_income,
                 MONEY,
-                "Physical cash portion of income",
+                "Counted as income"
+                if summary["includes_cash"]
+                else "Collected but not counted in the inflow above",
             ),
         ],
         charts=[{"type": "line", "title": "Running operating balance", "data": rows}],

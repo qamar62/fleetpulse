@@ -115,18 +115,27 @@ def _platform_insights(summary: dict, gross: Decimal) -> list[dict]:
             )
         )
 
-    cash = next((p for p in summary["platforms"] if p["platform"] == "cash"), None)
-    if cash and D(cash["income"]) > 0:
+    cash = summary["cash"]
+    if D(cash["income"]) > 0:
         share = cash["share_pct"]
         tone = WARNING if share is not None and D(share) >= 30 else NEUTRAL
+        counted = (
+            "It is being counted as income."
+            if summary["includes_cash"]
+            else "It is not counted as income here; the figures above are platform income only."
+        )
         out.append(
             _insight(
                 "cash_share",
                 "Cash exposure",
-                f"Cash makes up {share}% of gross income ({_money(cash['income'])}). "
-                "Cash collections are the hardest to reconcile against platform statements.",
+                f"Cash makes up {share}% of all money taken ({_money(cash['income'])}). "
+                f"Cash collections are the hardest to reconcile against platform statements. {counted}",
                 tone,
-                {"income": cash["income"], "share_pct": share},
+                {
+                    "income": cash["income"],
+                    "share_pct": share,
+                    "counted": summary["includes_cash"],
+                },
                 priority=40,
             )
         )

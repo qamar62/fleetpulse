@@ -10,8 +10,11 @@ from django.conf import settings
 from django.db.models import Count, Q
 
 from .aggregation import (
+    CASH,
+    COUNTED_PLATFORMS,
     Scope,
     _zero_sum,
+    cash_breakdown,
     daily_series,
     driver_breakdown,
     financial_summary,
@@ -21,6 +24,11 @@ from .aggregation import (
 from .money import D, ZERO, pct, quantize, safe_div
 
 PLATFORMS = settings.INCOME_PLATFORMS
+
+
+def counted_platforms(scope: Scope) -> list[str]:
+    """The platforms that make up counted income for this request."""
+    return list(PLATFORMS) if scope.include_cash else list(COUNTED_PLATFORMS)
 WEEKDAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
 
 
@@ -61,6 +69,7 @@ def dashboard(scope: Scope) -> dict:
         "best_day": days["best_day"],
         "worst_day": days["worst_day"],
         "best_platform": best_platform,
+        "cash": summary["cash"],
         "coverage": inactive_days(scope),
         "series": daily_series(scope),
         "platforms": platforms,
@@ -74,8 +83,11 @@ def profitability_waterfall(summary: dict) -> dict:
     """The explicit income → profit chain. Nothing is labelled profit implicitly."""
     return {
         "steps": [
-            {"key": "gross_income", "label": "Gross income", "amount": summary["gross_income"],
-             "kind": "total"},
+            {"key": "gross_income",
+             # The chain is read left to right as a sum, so the first step has
+             # to say which money it is or the arithmetic looks wrong.
+             "label": "Gross income" if summary["includes_cash"] else "Gross income (excl. cash)",
+             "amount": summary["gross_income"], "kind": "total"},
             {"key": "operating_expenses", "label": "Operating expenses",
              "amount": quantize(-D(summary["operating_expenses"])), "kind": "deduction"},
             {"key": "operating_profit", "label": "Operating profit",
@@ -93,6 +105,7 @@ def profitability_waterfall(summary: dict) -> dict:
 def income_mix(scope: Scope, granularity: str = "day") -> dict:
     """Platform mix over time, in both absolute and percentage terms."""
     series = monthly_series(scope) if granularity == "month" else daily_series(scope)
+    names = counted_platforms(scope)
 
     if granularity == "month":
         rows = []
@@ -100,7 +113,7 @@ def income_mix(scope: Scope, granularity: str = "day") -> dict:
             month_scope = _month_scope(scope, bucket["month"])
             summary = financial_summary(month_scope)
             rows.append(_mix_row(bucket["label"], bucket["month"], summary["platforms"]))
-        return {"granularity": "month", "platforms": PLATFORMS, "series": rows}
+        return {"granularity": "month", "platforms": names, "series": rows}
 
     rows = []
     for bucket in series:
@@ -110,11 +123,11 @@ def income_mix(scope: Scope, granularity: str = "day") -> dict:
                 "bucket": bucket["date"],
                 "label": bucket["date"],
                 "total": bucket["income"],
-                "values": {name: bucket["platforms"][name] for name in PLATFORMS},
-                "shares": {name: pct(bucket["platforms"][name], total) for name in PLATFORMS},
+                "values": {name: bucket["platforms"][name] for name in names},
+                "shares": {name: pct(bucket["platforms"][name], total) for name in names},
             }
         )
-    return {"granularity": "day", "platforms": PLATFORMS, "series": rows}
+    return {"granularity": "day", "platforms": names, "series": rows}
 
 
 def _mix_row(label, bucket, platforms):
@@ -241,30 +254,90 @@ def comparison(scope: Scope) -> dict:
 
 
 def cash_vs_platform(scope: Scope) -> dict:
+    """Cash against everything else.
+
+    Both sides are measured against the all-in total here whatever the toggle
+    says, because a split that leaves one side out of its own denominator is
+    not a split.
+    """
     summary = financial_summary(scope)
-    cash = next((p for p in summary["platforms"] if p["platform"] == "cash"), None)
-    cash_income = D(cash["income"]) if cash else ZERO
-    gross = D(summary["gross_income"])
-    platform_income = quantize(gross - cash_income)
+    cash_income = D(summary["cash_income"])
+    all_in = D(summary["gross_income_with_cash"])
+    platform_income = quantize(all_in - cash_income)
 
     series = []
     for bucket in daily_series(scope):
-        day_cash = D(bucket["platforms"].get("cash", ZERO))
+        day_cash = D(bucket["cash"])
+        day_platform = D(bucket["income"]) - (day_cash if scope.include_cash else ZERO)
+        day_total = quantize(day_platform + day_cash)
         series.append(
             {
                 "date": bucket["date"],
                 "cash": quantize(day_cash),
-                "platform": quantize(D(bucket["income"]) - day_cash),
-                "cash_share_pct": pct(day_cash, bucket["income"]),
+                "platform": quantize(day_platform),
+                "total": day_total,
+                "cash_share_pct": pct(day_cash, day_total),
             }
         )
 
     return {
         "cash_income": quantize(cash_income),
         "platform_income": platform_income,
-        "cash_share_pct": pct(cash_income, gross),
-        "platform_share_pct": pct(platform_income, gross),
+        "gross_income_with_cash": quantize(all_in),
+        "includes_cash": summary["includes_cash"],
+        "cash_share_pct": pct(cash_income, all_in),
+        "platform_share_pct": pct(platform_income, all_in),
         "series": series,
+    }
+
+
+def cash_desk(scope: Scope) -> dict:
+    """Everything the Cash page needs, in one round trip.
+
+    This view is deliberately unaffected by the include-cash toggle: its whole
+    subject is the cash itself. The toggle only decides whether the rest of the
+    application counts these same amounts as income, which is reported here as
+    ``includes_cash`` so the page can say so plainly.
+    """
+    summary = financial_summary(scope)
+    breakdown = cash_breakdown(scope)
+
+    cash = summary["cash"]
+    all_in = D(summary["gross_income_with_cash"])
+    cash_income = D(summary["cash_income"])
+
+    series = []
+    running = ZERO
+    for bucket in daily_series(scope):
+        day_cash = D(bucket["cash"])
+        running += day_cash
+        day_platform = D(bucket["income"]) - (day_cash if scope.include_cash else ZERO)
+        series.append(
+            {
+                "date": bucket["date"],
+                "weekday": bucket["weekday"],
+                "cash": quantize(day_cash),
+                "platform": quantize(day_platform),
+                "cumulative_cash": quantize(running),
+                "cash_share_pct": pct(day_cash, quantize(day_platform + day_cash)),
+            }
+        )
+
+    return {
+        "currency": settings.FLEET_CURRENCY,
+        "scope": scope.as_dict(),
+        "includes_cash": summary["includes_cash"],
+        "cash_income": summary["cash_income"],
+        "platform_income": quantize(all_in - cash_income),
+        "gross_income_with_cash": summary["gross_income_with_cash"],
+        "cash_share_pct": summary["cash_to_income_pct"],
+        "cash_days": cash["active_days"],
+        "average_per_cash_day": cash["average_per_active_day"],
+        "largest_cash_day": breakdown["top_days"][0] if breakdown["top_days"] else None,
+        "series": series,
+        "by_driver": breakdown["by_driver"],
+        "by_vehicle": breakdown["by_vehicle"],
+        "top_days": breakdown["top_days"],
     }
 
 
@@ -277,6 +350,8 @@ def platform_performance(scope: Scope) -> dict:
     rows = sorted(summary["platforms"], key=lambda item: D(item["income"]), reverse=True)
     return {
         "gross_income": summary["gross_income"],
+        "includes_cash": summary["includes_cash"],
+        "cash_income": summary["cash_income"],
         "rows": rows,
         "leader": rows[0] if rows and D(rows[0]["income"]) > 0 else None,
     }

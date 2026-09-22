@@ -232,6 +232,12 @@ FLEET_CURRENCY = os.getenv("FLEET_CURRENCY", "AED")
 # through totals, reports, analytics and the import wizard.
 INCOME_PLATFORMS = ["careem", "uber", "bolt", "yango", "cash"]
 
+# Cash sits in INCOME_PLATFORMS because it is money the fleet took, but it is
+# excluded from counted income unless a request asks for it: cash cannot be
+# reconciled against a platform statement, so counting it by default would
+# quietly inflate every margin in the system.
+CASH_PLATFORM = "cash"
+
 MAX_IMPORT_FILE_BYTES = int(os.getenv("MAX_IMPORT_FILE_BYTES", str(10 * 1024 * 1024)))
 
 
